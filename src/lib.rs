@@ -1,11 +1,10 @@
-use std::collections::HashMap;
-
 use nom::{
     branch::alt,
-    bytes::complete::{tag, take_until, take_while1},
+    bytes::complete::{tag, take_until, take_while, take_while1},
     character::complete::multispace0,
-    combinator::map,
-    sequence::{delimited, tuple},
+    combinator::{map, opt},
+    multi::many_till,
+    sequence::{delimited, preceded, tuple},
     IResult,
 };
 
@@ -53,10 +52,16 @@ fn double_quoted_string(input: &str) -> IResult<&str, String> {
     )(input)
 }
 
+/// Parse a maybe comment key/value pair starting with `!`
+fn parse_comment(input: &str) -> IResult<&str, ()> {
+    let (input, _) = opt(preceded(tag("!"), take_while(|c| c != '\n')))(input)?;
+    Ok((input, ()))
+}
+
 /// Parse key value pairs in a namelist, e.g. "calculation = 'scf'".
 /// The terminate comma in the end of each pair is optional
 fn parse_kv(input: &str) -> IResult<&str, KeyValPair> {
-    let (input, (k, _, v)) = tuple((
+    let (input, (k, _, v, _maybe_comma)) = tuple((
         ws(bare_ident),
         ws(tag("=")),
         ws(alt((
@@ -69,6 +74,7 @@ fn parse_kv(input: &str) -> IResult<&str, KeyValPair> {
             map(tag("''"), |_| String::new()),
             map(tag("\"\""), |_| String::new()),
         ))),
+        opt(ws(tag(","))), // optional trailing comma
     ))(input)?;
 
     Ok((input, (k, v)))
@@ -78,9 +84,16 @@ fn parse_namelist(input: &str) -> IResult<&str, Namelist> {
     // Expect namelist start with &
     let (input, _) = ws(tag("&"))(input)?;
     let (input, name) = ws(bare_ident)(input)?;
-    let lst = Vec::new();
 
-    Ok((input, Namelist { name, lst }))
+    // parse key/value pairs until slash
+    let (input, (items, _slash)) = many_till(
+        ws(alt((map(parse_kv, Some), map(parse_comment, |()| None)))),
+        ws(tag("/")),
+    )(input)?;
+
+    let kv_lst = items.into_iter().flatten().collect();
+
+    Ok((input, Namelist { name, lst: kv_lst }))
 }
 
 #[cfg(test)]
@@ -95,7 +108,11 @@ mod tests {
             (r"tstress = .false.,", "tstress".into(), ".false.".into()),
             (r"calculation = '',", "calculation".into(), String::new()),
             (r#"calculation = "","#, "calculation".into(), String::new()),
-            (r#"calculation = "scf","#, "calculation".into(), "scf".into()),
+            (
+                r#"calculation = "scf","#,
+                "calculation".into(),
+                "scf".into(),
+            ),
             (r"calculation = 'scf'", "calculation".into(), "scf".into()),
             (r"calculation = scf,", "calculation".into(), "scf".into()),
             (r"calculation =scf,", "calculation".into(), "scf".into()),
@@ -119,7 +136,45 @@ mod tests {
 /
 ";
 
-        let namelist = parse_namelist(input).unwrap();
-        dbg!(namelist);
+        let (_, got) = parse_namelist(input).unwrap();
+        assert_eq!(
+            got,
+            Namelist {
+                name: "control".into(),
+                lst: vec![
+                    ("pseudo_dir".into(), "pseudo/".into()),
+                    ("calculation".into(), "scf".into()),
+                    ("prefix".into(), "Si_exc1".into()),
+                    ("title".into(), "".into())
+                ]
+            }
+        );
+    }
+
+    #[test]
+    fn namelist_skip_comment() {
+        let input = r"
+&control
+    pseudo_dir  = 'pseudo/'
+    calculation = 'scf',
+    ! any kind of comment
+    prefix = 'Si_exc1',
+    title = ''
+/
+";
+
+        let (_, got) = parse_namelist(input).unwrap();
+        assert_eq!(
+            got,
+            Namelist {
+                name: "control".into(),
+                lst: vec![
+                    ("pseudo_dir".into(), "pseudo/".into()),
+                    ("calculation".into(), "scf".into()),
+                    ("prefix".into(), "Si_exc1".into()),
+                    ("title".into(), "".into())
+                ]
+            }
+        );
     }
 }
