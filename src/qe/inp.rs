@@ -1,10 +1,10 @@
 use nom::{
     branch::alt,
-    bytes::complete::{tag, take_until, take_while, take_while1},
+    bytes::complete::{tag, take_till1, take_until, take_while, take_while1},
     character::complete::{line_ending, multispace0, space0},
-    combinator::{eof, fail, map, opt, peek},
+    combinator::{fail, map, opt},
     error::context,
-    multi::{many1, many_m_n, many_till},
+    multi::{many1, many_till},
     sequence::{delimited, preceded, tuple},
     IResult,
 };
@@ -26,12 +26,12 @@ struct AtomicPosition {
     // label of the atom
     label: String,
     // atomic position (x, y, z)
-    position: Vec<String>,
+    position: Vec3,
     // if_pos
-    if_pos: Option<(String, String, String)>,
+    if_pos: Option<Vec3>,
 }
 
-type LatticeVector = (String, String, String);
+type Vec3 = (String, String, String);
 type Kxyzw = (String, String, String, String);
 
 #[derive(Debug, PartialEq)]
@@ -93,7 +93,7 @@ enum Block {
         typ: Option<String>,
 
         // vec of lattice constant
-        vecs: Vec<LatticeVector>,
+        vecs: Vec<Vec3>,
     },
 
     // K_POINTS block
@@ -106,6 +106,7 @@ pub struct QEInput {
 }
 
 /// wms remove white space before and after the inner parser
+/// It mostly used for line parser
 fn wms<'a, F, O>(inner: F) -> impl FnMut(&'a str) -> IResult<&'a str, O>
 where
     F: FnMut(&'a str) -> IResult<&'a str, O>,
@@ -114,6 +115,7 @@ where
 }
 
 /// ws remove white space (different from `wms` will not remove line break) before and after the inner parser
+/// It mostly used for identifier parser
 fn ws<'a, F, O>(inner: F) -> impl FnMut(&'a str) -> IResult<&'a str, O>
 where
     F: FnMut(&'a str) -> IResult<&'a str, O>,
@@ -160,15 +162,6 @@ fn double_quoted_string(input: &str) -> IResult<&str, String> {
     )(input)
 }
 
-/// Parse inner ``curly_braces`` string (e.g. "{alat}")
-fn curly_braces_string(input: &str) -> IResult<&str, String> {
-    delimited(
-        tag("{"),
-        map(take_until("}"), |s: &str| s.to_string()),
-        tag("}"),
-    )(input)
-}
-
 /// Parse a maybe comment key/value pair starting with `!`
 fn parse_comment(input: &str) -> IResult<&str, ()> {
     let (input, _) = opt(preceded(tag("!"), take_while(|c| c != '\n')))(input)?;
@@ -179,9 +172,9 @@ fn parse_comment(input: &str) -> IResult<&str, ()> {
 /// The terminate comma in the end of each pair is optional
 fn parse_kv(input: &str) -> IResult<&str, KeyValPair> {
     let (input, (k, _, v, _maybe_comma)) = tuple((
-        wms(bare_ident),
-        wms(tag("=")),
-        wms(alt((
+        ws(bare_ident),
+        ws(tag("=")),
+        ws(alt((
             single_quoted_string,
             map(double_quoted_string, |s| {
                 eprintln!("Waring: in {input}, double quotes used, use single quotes instead");
@@ -191,7 +184,7 @@ fn parse_kv(input: &str) -> IResult<&str, KeyValPair> {
             map(tag("''"), |_| String::new()),
             map(tag("\"\""), |_| String::new()),
         ))),
-        opt(wms(tag(","))), // optional trailing comma
+        opt(ws(tag(","))), // optional trailing comma
     ))(input)?;
 
     Ok((input, (k, v)))
@@ -199,8 +192,8 @@ fn parse_kv(input: &str) -> IResult<&str, KeyValPair> {
 
 fn parse_namelist(input: &str) -> IResult<&str, Block> {
     // Expect namelist start with &
-    let (input, _) = wms(tag("&"))(input)?;
-    let (input, name) = wms(bare_ident)(input)?;
+    let (input, _) = preceded(multispace0, ws(tag("&")))(input)?;
+    let (input, name) = ws(bare_ident)(input)?;
 
     // parse key/value pairs until slash
     let (input, (items, _slash)) = many_till(
@@ -214,9 +207,9 @@ fn parse_namelist(input: &str) -> IResult<&str, Block> {
 }
 
 fn parse_species_line(input: &str) -> IResult<&str, AtomicSpecie> {
-    let (input, label) = wms(bare_ident)(input)?;
-    let (input, mass) = wms(bare_ident)(input)?;
-    let (input, pseudo) = wms(bare_ident)(input)?;
+    let (input, label) = ws(bare_ident)(input)?;
+    let (input, mass) = ws(bare_ident)(input)?;
+    let (input, pseudo) = ws(bare_ident)(input)?;
 
     Ok((
         input,
@@ -229,28 +222,23 @@ fn parse_species_line(input: &str) -> IResult<&str, AtomicSpecie> {
 }
 
 fn parse_atomic_species(input: &str) -> IResult<&str, Block> {
-    let (input, _) = wms(tag("ATOMIC_SPECIES"))(input)?;
+    let (input, _) = preceded(multispace0, ws(tag("ATOMIC_SPECIES")))(input)?;
     let (input, species) = many1(wms(parse_species_line))(input)?;
 
     Ok((input, Block::AtomicSpecies(species)))
 }
 
-fn parse_position_line(input: &str) -> IResult<&str, AtomicPosition> {
-    let (input, label) = wms(bare_ident)(input)?;
-    let (input, (position, curly_bra_or_line_ending)) = many_till(
-        ws(bare_ident),
-        alt((peek(tag("{")), peek(line_ending), eof)),
-    )(input)?;
+fn parse_vec3(input: &str) -> IResult<&str, Vec3> {
+    let (input, v3) = tuple((ws(bare_ident), ws(bare_ident), ws(bare_ident)))(input)?;
+    Ok((input, v3))
+}
 
-    let if_pos = if curly_bra_or_line_ending == "{" {
-        let (input, _) = tag("{")(input)?;
-        let (input, triple) = tuple((wms(bare_ident), wms(bare_ident), wms(bare_ident)))(input)?;
-        // discard `}`
-        let (_, _) = tag("}")(input)?;
-        Some(triple)
-    } else {
-        None
-    };
+fn parse_position_line(input: &str) -> IResult<&str, AtomicPosition> {
+    let (input, label) = ws(bare_ident)(input)?;
+    let (input, position) = parse_vec3(input)?;
+
+    let (input, if_pos) = opt(parse_vec3)(input)?;
+    dbg!(input);
 
     Ok((
         input,
@@ -263,14 +251,17 @@ fn parse_position_line(input: &str) -> IResult<&str, AtomicPosition> {
 }
 
 fn parse_atomic_positions(input: &str) -> IResult<&str, Block> {
-    let (input, _) = wms(tag("ATOMIC_POSITIONS"))(input)?;
-    let (input, typ) = wms(opt(curly_braces_string))(input)?;
-    let (input, lst) = many1(parse_position_line)(input)?;
+    let (input, _) = preceded(multispace0, ws(tag("ATOMIC_POSITIONS")))(input)?;
+    let (input, typ) = ws(opt(take_till1(|c: char| c == '\n')))(input)?;
+    let (input, _) = tag("\n")(input)?;
+    let (input, lst) = many1(wms(parse_position_line))(input)?;
+
+    let typ = typ.map(ToString::to_string);
 
     Ok((input, Block::AtomicPositions { typ, lst }))
 }
 
-fn parse_vector_line(input: &str) -> IResult<&str, LatticeVector> {
+fn parse_vector_line(input: &str) -> IResult<&str, Vec3> {
     let (input, vv) = tuple((ws(bare_ident), ws(bare_ident), ws(bare_ident)))(input)?;
     let (input, _) = line_ending(input)?;
 
@@ -278,9 +269,12 @@ fn parse_vector_line(input: &str) -> IResult<&str, LatticeVector> {
 }
 
 fn parse_cell_parameters(input: &str) -> IResult<&str, Block> {
-    let (input, _) = wms(tag("CELL_PARAMETERS"))(input)?;
-    let (input, typ) = wms(opt(curly_braces_string))(input)?;
+    let (input, _) = preceded(multispace0, ws(tag("CELL_PARAMETERS")))(input)?;
+    let (input, typ) = ws(opt(take_till1(|c: char| c == '\n')))(input)?;
+    let (input, _) = tag("\n")(input)?;
     let (input, vecs) = many1(parse_vector_line)(input)?;
+
+    let typ = typ.map(ToString::to_string);
 
     assert_eq!(
         vecs.len(),
@@ -304,8 +298,11 @@ fn parse_kxyzw_line(input: &str) -> IResult<&str, Kxyzw> {
 }
 
 fn parse_k_points(input: &str) -> IResult<&str, Block> {
-    let (input, _) = wms(tag("K_POINTS"))(input)?;
-    let (input, typ) = wms(opt(curly_braces_string))(input)?;
+    let (input, _) = preceded(multispace0, ws(tag("K_POINTS")))(input)?;
+    let (input, typ) = ws(opt(take_till1(|c: char| c == '\n')))(input)?;
+    let (input, _) = tag("\n")(input)?;
+
+    let typ = typ.map(ToString::to_string);
 
     // the typ requires to be known before parsing rest. Set to default to "tbipa" accourding to
     // INPUT_PW.html
@@ -313,8 +310,8 @@ fn parse_k_points(input: &str) -> IResult<&str, Block> {
     let (input, kpt) = match typ.as_str() {
         "gamma" => (input, KPoints::Gamma),
         "automatic" => {
-            let (input, mesh) = tuple((ws(bare_ident), ws(bare_ident), ws(bare_ident)))(input)?;
-            let (_, offset) = tuple((ws(bare_ident), ws(bare_ident), ws(bare_ident)))(input)?;
+            let (input, mesh) = parse_vec3(input)?;
+            let (_, offset) = parse_vec3(input)?;
 
             (input, KPoints::Automatic { mesh, offset })
         }
@@ -394,7 +391,7 @@ mod tests {
                     ("pseudo_dir".into(), "pseudo/".into()),
                     ("calculation".into(), "scf".into()),
                     ("prefix".into(), "Si_exc1".into()),
-                    ("title".into(), "".into())
+                    ("title".into(), String::new())
                 ]
             }
         );
@@ -421,7 +418,7 @@ mod tests {
                     ("pseudo_dir".into(), "pseudo/".into()),
                     ("calculation".into(), "scf".into()),
                     ("prefix".into(), "Si_exc1".into()),
-                    ("title".into(), "".into())
+                    ("title".into(), String::new())
                 ]
             }
         );
@@ -462,7 +459,7 @@ ATOMIC_SPECIES
             got,
             AtomicPosition {
                 label: "H".into(),
-                position: vec!["0.00".into(), "0.00".into(), "-0.35".into(),],
+                position: ("0.00".into(), "0.00".into(), "-0.35".into()),
                 if_pos: None,
             }
         );
@@ -475,7 +472,7 @@ ATOMIC_SPECIES
             got,
             AtomicPosition {
                 label: "H".into(),
-                position: vec!["1/3".into(), "1/2*3^(-1/2)".into(), "0".into()],
+                position: ("1/3".into(), "1/2*3^(-1/2)".into(), "0".into()),
                 if_pos: None,
             }
         );
@@ -485,19 +482,19 @@ ATOMIC_SPECIES
             got,
             AtomicPosition {
                 label: "H".into(),
-                position: vec!["1/3".into(), "1/2*3^(-1/2)".into(), "0".into()],
+                position: ("1/3".into(), "1/2*3^(-1/2)".into(), "0".into()),
                 if_pos: None,
             }
         );
 
-        let inp = "H  0.00 0.00 -0.35 {0 0 0}";
+        let inp = "H  0.00 0.00 -0.35 0 0 0";
 
         let (_, got) = parse_position_line(inp).unwrap();
         assert_eq!(
             got,
             AtomicPosition {
                 label: "H".into(),
-                position: vec!["0.00".into(), "0.00".into(), "-0.35".into(),],
+                position: ("0.00".into(), "0.00".into(), "-0.35".into()),
                 if_pos: Some(("0".into(), "0".into(), "0".into())),
             }
         );
@@ -506,9 +503,9 @@ ATOMIC_SPECIES
     #[test]
     fn atomic_positions() {
         let input = r"
-ATOMIC_POSITIONS {angstrom}
+ATOMIC_POSITIONS angstrom
  H  0.00 0.00 -0.35
- H  0.00 0.00  0.35 {0 0 0}
+ H  0.00 0.00  0.35 0 0 0
 ";
 
         let (_, got) = parse_atomic_positions(input).unwrap();
@@ -519,12 +516,12 @@ ATOMIC_POSITIONS {angstrom}
                 lst: vec![
                     AtomicPosition {
                         label: "H".into(),
-                        position: vec!["0.00".into(), "0.00".into(), "-0.35".into(),],
+                        position: ("0.00".into(), "0.00".into(), "-0.35".into()),
                         if_pos: None,
                     },
                     AtomicPosition {
                         label: "H".into(),
-                        position: vec!["0.00".into(), "0.00".into(), "0.35".into(),],
+                        position: ("0.00".into(), "0.00".into(), "0.35".into()),
                         if_pos: Some(("0".into(), "0".into(), "0".into())),
                     }
                 ],
@@ -533,49 +530,14 @@ ATOMIC_POSITIONS {angstrom}
     }
 
     #[test]
-    fn atomic_positions_wyckoff() {
-        let input = r"
-ATOMIC_POSITIONS {angstrom}
-     H  1a
-     H  8g   x
-     H  24m  x y
-";
-
-        let (_, got) = parse_atomic_positions(input).unwrap();
-        assert_eq!(
-            got,
-            Block::AtomicPositions {
-                typ: Some("angstrom".into()),
-                lst: vec![
-                    AtomicPosition {
-                        label: "H".into(),
-                        position: vec!["1a".into()],
-                        if_pos: None,
-                    },
-                    AtomicPosition {
-                        label: "H".into(),
-                        position: vec!["8g".into(), "x".into()],
-                        if_pos: None,
-                    },
-                    AtomicPosition {
-                        label: "H".into(),
-                        position: vec!["24m".into(), "x".into(), "y".into()],
-                        if_pos: None,
-                    },
-                ],
-            }
-        );
-    }
-
-    #[test]
     fn cell_parameters() {
         let input = r"
-CELL_PARAMETERS {alat}
+CELL_PARAMETERS alat
 -1.0 1.0 1.0
  1.0 -1.0 1.0
  1.0 1.0 -1.0
 ";
-        let (_, got) = parse_cell_parameters(input).unwrap();
+        let (_, got) = wms(parse_cell_parameters)(input).unwrap();
         assert_eq!(
             got,
             Block::CellParameters {
@@ -587,6 +549,8 @@ CELL_PARAMETERS {alat}
                 ]
             }
         );
+
+        println!("!!!!!");
 
         let input = r"
 CELL_PARAMETERS
@@ -611,14 +575,14 @@ CELL_PARAMETERS
     #[test]
     fn kpoints_card() {
         let input = r"
-K_POINTS {gamma}
+K_POINTS gamma
 ";
         let (_, got) = parse_k_points(input).unwrap();
         assert_eq!(got, Block::KPointsCard(KPoints::Gamma));
 
         let input = r"
-K_POINTS {automatic}
- 2 2 2 1 1 1
+K_POINTS automatic
+2 2 2 1 1 1
 ";
         let (_, got) = parse_k_points(input).unwrap();
         assert_eq!(
@@ -628,11 +592,12 @@ K_POINTS {automatic}
                 offset: ("1".into(), "1".into(), "1".into())
             })
         );
+
         let input = r"
 K_POINTS
-2  
-    0 0 0 1
-    0.5 0.5 0.5 1
+2
+0 0 0 1
+0.5 0.5 0.5 1
 ";
         let (_, got) = parse_k_points(input).unwrap();
         assert_eq!(
@@ -664,10 +629,10 @@ K_POINTS
  /
 ATOMIC_SPECIES
  H 1.0008   H.pz-vbc.UPF
-ATOMIC_POSITIONS {angstrom}
+ATOMIC_POSITIONS angstrom
  H  0.00 0.00 -0.35
  H  0.00 0.00  0.35
-K_POINTS {automatic}
+K_POINTS automatic
  2 2 2 1 1 1
 ";
         let (_, got) = parse_pw_input(input).unwrap();
@@ -701,12 +666,12 @@ K_POINTS {automatic}
                     lst: vec![
                         AtomicPosition {
                             label: "H".into(),
-                            position: vec!["0.00".into(), "0.00".into(), "-0.35".into()],
+                            position: ("0.00".into(), "0.00".into(), "-0.35".into()),
                             if_pos: None,
                         },
                         AtomicPosition {
                             label: "H".into(),
-                            position: vec!["0.00".into(), "0.00".into(), "0.35".into()],
+                            position: ("0.00".into(), "0.00".into(), "0.35".into()),
                             if_pos: None,
                         },
                     ],
