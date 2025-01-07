@@ -3,18 +3,23 @@ use nom::{
     bytes::complete::{tag, take_until, take_while, take_while1},
     character::complete::multispace0,
     combinator::{map, opt},
-    multi::many_till,
+    multi::{many1, many_till},
     sequence::{delimited, preceded, tuple},
     IResult,
 };
 
 type KeyValPair = (String, String);
 
-/// Namelist of QE input is a named list of key/value pairs
+/// Block type for the block container of the input
 #[derive(Debug, PartialEq)]
-struct Namelist {
-    name: String,
-    lst: Vec<KeyValPair>,
+enum Block {
+    // Namelist of QE input is a named list of key/value pairs
+    Namelist { name: String, lst: Vec<KeyValPair> },
+}
+
+#[derive(Debug, PartialEq)]
+struct QEInput {
+    blocks: Vec<Block>,
 }
 
 /// ws remove white space before and after the inner parser
@@ -80,7 +85,7 @@ fn parse_kv(input: &str) -> IResult<&str, KeyValPair> {
     Ok((input, (k, v)))
 }
 
-fn parse_namelist(input: &str) -> IResult<&str, Namelist> {
+fn parse_namelist(input: &str) -> IResult<&str, Block> {
     // Expect namelist start with &
     let (input, _) = ws(tag("&"))(input)?;
     let (input, name) = ws(bare_ident)(input)?;
@@ -93,7 +98,14 @@ fn parse_namelist(input: &str) -> IResult<&str, Namelist> {
 
     let kv_lst = items.into_iter().flatten().collect();
 
-    Ok((input, Namelist { name, lst: kv_lst }))
+    Ok((input, Block::Namelist { name, lst: kv_lst }))
+}
+
+fn parse_qe_input(input: &str) -> IResult<&str, QEInput> {
+    // Repeatedly parse recognized block until can't
+    let (input, blocks) = many1(ws(alt((parse_namelist,))))(input)?;
+
+    Ok((input, QEInput { blocks }))
 }
 
 #[cfg(test)]
@@ -139,13 +151,67 @@ mod tests {
         let (_, got) = parse_namelist(input).unwrap();
         assert_eq!(
             got,
-            Namelist {
+            Block::Namelist {
                 name: "control".into(),
                 lst: vec![
                     ("pseudo_dir".into(), "pseudo/".into()),
                     ("calculation".into(), "scf".into()),
                     ("prefix".into(), "Si_exc1".into()),
                     ("title".into(), "".into())
+                ]
+            }
+        );
+    }
+
+    #[test]
+    fn namelist_many() {
+        let input = r"
+&control
+    pseudo_dir  = 'pseudo/'
+    calculation = 'scf',
+    prefix = 'Si_exc1',
+    title = ''
+/
+ &system
+    ibrav = 0
+    ! ibrav =  -3,
+    celldm(1) = 20.385647759,
+    nat =  1,
+    ntyp = 1,
+    ecutwfc = 30
+ /
+ &electrons
+ /
+";
+
+        let (_, got) = parse_qe_input(input).unwrap();
+        assert_eq!(
+            got,
+            QEInput {
+                blocks: vec![
+                    Block::Namelist {
+                        name: "control".into(),
+                        lst: vec![
+                            ("pseudo_dir".into(), "pseudo/".into()),
+                            ("calculation".into(), "scf".into()),
+                            ("prefix".into(), "Si_exc1".into()),
+                            ("title".into(), "".into())
+                        ]
+                    },
+                    Block::Namelist {
+                        name: "system".into(),
+                        lst: vec![
+                            ("ibrav".into(), "0".into()),
+                            ("celldm(1)".into(), "20.385647759".into()),
+                            ("nat".into(), "1".into()),
+                            ("ntyp".into(), "1".into()),
+                            ("ecutwfc".into(), "30".into())
+                        ]
+                    },
+                    Block::Namelist {
+                        name: "electrons".into(),
+                        lst: vec![]
+                    },
                 ]
             }
         );
@@ -166,7 +232,7 @@ mod tests {
         let (_, got) = parse_namelist(input).unwrap();
         assert_eq!(
             got,
-            Namelist {
+            Block::Namelist {
                 name: "control".into(),
                 lst: vec![
                     ("pseudo_dir".into(), "pseudo/".into()),
