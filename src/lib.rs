@@ -10,11 +10,26 @@ use nom::{
 
 type KeyValPair = (String, String);
 
+#[derive(Debug, PartialEq)]
+struct AtomicSpecies {
+    // label of the atom
+    label: String,
+    // mass of the atomic species
+    mass: String,
+    // file containing PP for the species
+    pseudo: String,
+}
+
 /// Block type for the block container of the input
 #[derive(Debug, PartialEq)]
 enum Block {
     // Namelist of QE input is a named list of key/value pairs
     Namelist { name: String, lst: Vec<KeyValPair> },
+
+    // ATOMIC_SPECIES block has format:
+    // X Mass_X PseudoPot_X
+    // for every element of the structure
+    AtomicSpecies(Vec<AtomicSpecies>),
 }
 
 #[derive(Debug, PartialEq)]
@@ -33,7 +48,9 @@ where
 // Parse a bare (unquoted) identifier or keyword (e.g. calculation, prefix)
 fn bare_ident(input: &str) -> IResult<&str, String> {
     map(
-        take_while1(|c: char| c.is_alphanumeric() || c == '_' || c == '(' || c == ')' || c == '.'),
+        take_while1(|c: char| {
+            c.is_alphanumeric() || c == '_' || c == '(' || c == ')' || c == '.' || c == '-'
+        }),
         |s: &str| s.to_string(),
     )(input)
 }
@@ -101,6 +118,28 @@ fn parse_namelist(input: &str) -> IResult<&str, Block> {
     Ok((input, Block::Namelist { name, lst: kv_lst }))
 }
 
+fn parse_species_line(input: &str) -> IResult<&str, AtomicSpecies> {
+    let (input, label) = ws(bare_ident)(input)?;
+    let (input, mass) = ws(bare_ident)(input)?;
+    let (input, pseudo) = ws(bare_ident)(input)?;
+
+    Ok((
+        input,
+        AtomicSpecies {
+            label,
+            mass,
+            pseudo,
+        },
+    ))
+}
+
+fn parse_atomic_species(input: &str) -> IResult<&str, Block> {
+    let (input, _) = ws(tag("ATOMIC_SPECIES"))(input)?;
+    let (input, species) = many1(ws(parse_species_line))(input)?;
+
+    Ok((input, Block::AtomicSpecies(species)))
+}
+
 fn parse_qe_input(input: &str) -> IResult<&str, QEInput> {
     // Repeatedly parse recognized block until can't
     let (input, blocks) = many1(ws(alt((parse_namelist,))))(input)?;
@@ -160,6 +199,32 @@ mod tests {
                     ("title".into(), "".into())
                 ]
             }
+        );
+    }
+
+    #[test]
+    fn atomic_species() {
+        let input = r"
+ATOMIC_SPECIES
+ Si 28.086  Si.pbe-n-rrkjus_psl.1.0.0.UPF
+ H 1.0008   H.pz-vbc.UPF
+";
+
+        let (_, got) = parse_atomic_species(input).unwrap();
+        assert_eq!(
+            got,
+            Block::AtomicSpecies(vec![
+                AtomicSpecies {
+                    label: "Si".into(),
+                    mass: "28.086".into(),
+                    pseudo: "Si.pbe-n-rrkjus_psl.1.0.0.UPF".into()
+                },
+                AtomicSpecies {
+                    label: "H".into(),
+                    mass: "1.0008".into(),
+                    pseudo: "H.pz-vbc.UPF".into()
+                },
+            ])
         );
     }
 
