@@ -1,8 +1,8 @@
 use nom::{
     branch::alt,
     bytes::complete::{tag, take_until, take_while, take_while1},
-    character::complete::multispace0,
-    combinator::{map, opt},
+    character::complete::{line_ending, multispace0, space0},
+    combinator::{eof, map, opt, peek},
     multi::{many1, many_till},
     sequence::{delimited, preceded, tuple},
     IResult,
@@ -11,7 +11,7 @@ use nom::{
 type KeyValPair = (String, String);
 
 #[derive(Debug, PartialEq)]
-struct AtomicSpecies {
+struct AtomicSpecie {
     // label of the atom
     label: String,
     // mass of the atomic species
@@ -20,16 +20,43 @@ struct AtomicSpecies {
     pseudo: String,
 }
 
+#[derive(Debug, PartialEq)]
+struct AtomicPosition {
+    // label of the atom
+    label: String,
+    // atomic position (x, y, z)
+    position: Vec<String>,
+    // if_pos
+    if_pos: Option<(String, String, String)>,
+}
+
 /// Block type for the block container of the input
 #[derive(Debug, PartialEq)]
 enum Block {
     // Namelist of QE input is a named list of key/value pairs
-    Namelist { name: String, lst: Vec<KeyValPair> },
+    Namelist {
+        name: String,
+        lst: Vec<KeyValPair>,
+    },
 
     // ATOMIC_SPECIES block has format:
     // X Mass_X PseudoPot_X
     // for every element of the structure
-    AtomicSpecies(Vec<AtomicSpecies>),
+    AtomicSpecies(Vec<AtomicSpecie>),
+
+    // ATOMIC_POSITIONS bolck has format:
+    // ATOMIC_POSITIONS { alat | bohr | angstrom | crystal | crystal_sg }
+    // X(1)  	 x(1)  	 y(1)  	 z(1)  	{ 	 if_pos(1)(1)  	 if_pos(2)(1)  	 if_pos(3)(1)  	}
+    // X(2)  	 x(2)  	 y(2)  	 z(2)  	{ 	 if_pos(1)(2)  	 if_pos(2)(2)  	 if_pos(3)(2)  	}
+    // . . .
+    AtomicPositions {
+        // `typ` can be one of:
+        // alat | bohr | angstrom | crystal | crystal_sg for how position is defined
+        typ: String,
+
+        // vec of postions
+        lst: Vec<AtomicPosition>,
+    },
 }
 
 #[derive(Debug, PartialEq)]
@@ -37,19 +64,38 @@ struct QEInput {
     blocks: Vec<Block>,
 }
 
-/// ws remove white space before and after the inner parser
-fn ws<'a, F, O>(inner: F) -> impl FnMut(&'a str) -> IResult<&'a str, O>
+/// wms remove white space before and after the inner parser
+fn wms<'a, F, O>(inner: F) -> impl FnMut(&'a str) -> IResult<&'a str, O>
 where
     F: FnMut(&'a str) -> IResult<&'a str, O>,
 {
     delimited(multispace0, inner, multispace0)
 }
 
+/// ws remove white space (different from `wms` will not remove line break) before and after the inner parser
+fn ws<'a, F, O>(inner: F) -> impl FnMut(&'a str) -> IResult<&'a str, O>
+where
+    F: FnMut(&'a str) -> IResult<&'a str, O>,
+{
+    delimited(space0, inner, space0)
+}
+
 // Parse a bare (unquoted) identifier or keyword (e.g. calculation, prefix)
+// `alphanumeric`, `_`, `(`, `)`, `.`, `-`, `/` in the parsed string.
 fn bare_ident(input: &str) -> IResult<&str, String> {
+    dbg!(input);
     map(
         take_while1(|c: char| {
-            c.is_alphanumeric() || c == '_' || c == '(' || c == ')' || c == '.' || c == '-'
+            c.is_alphanumeric()
+                || c == '_'
+                || c == '('
+                || c == ')'
+                || c == '.'
+                || c == '-'
+                || c == '/'
+                || c == '+'
+                || c == '*'
+                || c == '^'
         }),
         |s: &str| s.to_string(),
     )(input)
@@ -74,6 +120,16 @@ fn double_quoted_string(input: &str) -> IResult<&str, String> {
     )(input)
 }
 
+/// Parse a double-quoted string (e.g. "pseudo/")
+/// While using double quotes is not encouraged.
+fn curly_braces_string(input: &str) -> IResult<&str, String> {
+    delimited(
+        tag("{"),
+        map(take_until("}"), |s: &str| s.to_string()),
+        tag("}"),
+    )(input)
+}
+
 /// Parse a maybe comment key/value pair starting with `!`
 fn parse_comment(input: &str) -> IResult<&str, ()> {
     let (input, _) = opt(preceded(tag("!"), take_while(|c| c != '\n')))(input)?;
@@ -84,9 +140,9 @@ fn parse_comment(input: &str) -> IResult<&str, ()> {
 /// The terminate comma in the end of each pair is optional
 fn parse_kv(input: &str) -> IResult<&str, KeyValPair> {
     let (input, (k, _, v, _maybe_comma)) = tuple((
-        ws(bare_ident),
-        ws(tag("=")),
-        ws(alt((
+        wms(bare_ident),
+        wms(tag("=")),
+        wms(alt((
             single_quoted_string,
             map(double_quoted_string, |s| {
                 eprintln!("Waring: in {input}, double quotes used, use single quotes instead");
@@ -96,7 +152,7 @@ fn parse_kv(input: &str) -> IResult<&str, KeyValPair> {
             map(tag("''"), |_| String::new()),
             map(tag("\"\""), |_| String::new()),
         ))),
-        opt(ws(tag(","))), // optional trailing comma
+        opt(wms(tag(","))), // optional trailing comma
     ))(input)?;
 
     Ok((input, (k, v)))
@@ -104,13 +160,13 @@ fn parse_kv(input: &str) -> IResult<&str, KeyValPair> {
 
 fn parse_namelist(input: &str) -> IResult<&str, Block> {
     // Expect namelist start with &
-    let (input, _) = ws(tag("&"))(input)?;
-    let (input, name) = ws(bare_ident)(input)?;
+    let (input, _) = wms(tag("&"))(input)?;
+    let (input, name) = wms(bare_ident)(input)?;
 
     // parse key/value pairs until slash
     let (input, (items, _slash)) = many_till(
-        ws(alt((map(parse_kv, Some), map(parse_comment, |()| None)))),
-        ws(tag("/")),
+        wms(alt((map(parse_kv, Some), map(parse_comment, |()| None)))),
+        wms(tag("/")),
     )(input)?;
 
     let kv_lst = items.into_iter().flatten().collect();
@@ -118,14 +174,14 @@ fn parse_namelist(input: &str) -> IResult<&str, Block> {
     Ok((input, Block::Namelist { name, lst: kv_lst }))
 }
 
-fn parse_species_line(input: &str) -> IResult<&str, AtomicSpecies> {
-    let (input, label) = ws(bare_ident)(input)?;
-    let (input, mass) = ws(bare_ident)(input)?;
-    let (input, pseudo) = ws(bare_ident)(input)?;
+fn parse_species_line(input: &str) -> IResult<&str, AtomicSpecie> {
+    let (input, label) = wms(bare_ident)(input)?;
+    let (input, mass) = wms(bare_ident)(input)?;
+    let (input, pseudo) = wms(bare_ident)(input)?;
 
     Ok((
         input,
-        AtomicSpecies {
+        AtomicSpecie {
             label,
             mass,
             pseudo,
@@ -134,15 +190,50 @@ fn parse_species_line(input: &str) -> IResult<&str, AtomicSpecies> {
 }
 
 fn parse_atomic_species(input: &str) -> IResult<&str, Block> {
-    let (input, _) = ws(tag("ATOMIC_SPECIES"))(input)?;
-    let (input, species) = many1(ws(parse_species_line))(input)?;
+    let (input, _) = wms(tag("ATOMIC_SPECIES"))(input)?;
+    let (input, species) = many1(wms(parse_species_line))(input)?;
 
     Ok((input, Block::AtomicSpecies(species)))
 }
 
+fn parse_position_line(input: &str) -> IResult<&str, AtomicPosition> {
+    let (input, label) = wms(bare_ident)(input)?;
+    let (input, (position, curly_bra_or_line_ending)) = many_till(
+        ws(bare_ident),
+        alt((peek(tag("{")), peek(line_ending), eof)),
+    )(input)?;
+
+    let if_pos = if curly_bra_or_line_ending == "{" {
+        let (input, _) = tag("{")(input)?;
+        let (input, triple) = tuple((wms(bare_ident), wms(bare_ident), wms(bare_ident)))(input)?;
+        // discard `}`
+        let (_, _) = tag("}")(input)?;
+        Some(triple)
+    } else {
+        None
+    };
+
+    Ok((
+        input,
+        AtomicPosition {
+            label,
+            position,
+            if_pos,
+        },
+    ))
+}
+
+fn parse_atomic_positions(input: &str) -> IResult<&str, Block> {
+    let (input, _) = wms(tag("ATOMIC_POSITIONS"))(input)?;
+    let (input, typ) = wms(curly_braces_string)(input)?;
+    let (input, lst) = many1(parse_position_line)(input)?;
+
+    Ok((input, Block::AtomicPositions { typ, lst }))
+}
+
 fn parse_qe_input(input: &str) -> IResult<&str, QEInput> {
     // Repeatedly parse recognized block until can't
-    let (input, blocks) = many1(ws(alt((parse_namelist,))))(input)?;
+    let (input, blocks) = many1(wms(alt((parse_namelist,))))(input)?;
 
     Ok((input, QEInput { blocks }))
 }
@@ -214,17 +305,131 @@ ATOMIC_SPECIES
         assert_eq!(
             got,
             Block::AtomicSpecies(vec![
-                AtomicSpecies {
+                AtomicSpecie {
                     label: "Si".into(),
                     mass: "28.086".into(),
                     pseudo: "Si.pbe-n-rrkjus_psl.1.0.0.UPF".into()
                 },
-                AtomicSpecies {
+                AtomicSpecie {
                     label: "H".into(),
                     mass: "1.0008".into(),
                     pseudo: "H.pz-vbc.UPF".into()
                 },
             ])
+        );
+    }
+
+    #[test]
+    fn atomic_position_line() {
+        let inp = "H  0.00 0.00 -0.35";
+
+        let (_, got) = parse_position_line(inp).unwrap();
+        assert_eq!(
+            got,
+            AtomicPosition {
+                label: "H".into(),
+                position: vec!["0.00".into(), "0.00".into(), "-0.35".into(),],
+                if_pos: None,
+            }
+        );
+
+        // pw.x allow simple algebraic expression
+        let inp = "H  1/3   1/2*3^(-1/2)   0";
+
+        let (_, got) = parse_position_line(inp).unwrap();
+        assert_eq!(
+            got,
+            AtomicPosition {
+                label: "H".into(),
+                position: vec!["1/3".into(), "1/2*3^(-1/2)".into(), "0".into()],
+                if_pos: None,
+            }
+        );
+
+        let (_, got) = parse_position_line(inp).unwrap();
+        assert_eq!(
+            got,
+            AtomicPosition {
+                label: "H".into(),
+                position: vec!["1/3".into(), "1/2*3^(-1/2)".into(), "0".into()],
+                if_pos: None,
+            }
+        );
+
+        let inp = "H  0.00 0.00 -0.35 {0 0 0}";
+
+        let (_, got) = parse_position_line(inp).unwrap();
+        assert_eq!(
+            got,
+            AtomicPosition {
+                label: "H".into(),
+                position: vec!["0.00".into(), "0.00".into(), "-0.35".into(),],
+                if_pos: Some(("0".into(), "0".into(), "0".into())),
+            }
+        );
+    }
+
+    #[test]
+    fn atomic_positions() {
+        let input = r"
+ATOMIC_POSITIONS {angstrom}
+ H  0.00 0.00 -0.35
+ H  0.00 0.00  0.35 {0 0 0}
+";
+
+        let (_, got) = parse_atomic_positions(input).unwrap();
+        assert_eq!(
+            got,
+            Block::AtomicPositions {
+                typ: "angstrom".into(),
+                lst: vec![
+                    AtomicPosition {
+                        label: "H".into(),
+                        position: vec!["0.00".into(), "0.00".into(), "-0.35".into(),],
+                        if_pos: None,
+                    },
+                    AtomicPosition {
+                        label: "H".into(),
+                        position: vec!["0.00".into(), "0.00".into(), "0.35".into(),],
+                        if_pos: Some(("0".into(), "0".into(), "0".into())),
+                    }
+                ],
+            }
+        );
+    }
+
+    #[test]
+    fn atomic_positions_wyckoff() {
+        let input = r"
+ATOMIC_POSITIONS {angstrom}
+     H  1a
+     H  8g   x
+     H  24m  x y
+";
+
+        let (_, got) = parse_atomic_positions(input).unwrap();
+        assert_eq!(
+            got,
+            Block::AtomicPositions {
+                typ: "angstrom".into(),
+                lst: vec![
+                    AtomicPosition {
+                        label: "H".into(),
+                        position: vec!["1a".into()],
+                        if_pos: None,
+                    },
+                    AtomicPosition {
+                        label: "H".into(),
+                        position: vec!["8g".into(), "x".into()],
+                        if_pos: None,
+                    },
+                    AtomicPosition {
+                        label: "H".into(),
+                        position: vec!["24m".into(), "x".into(), "y".into()],
+                        if_pos: None,
+                    },
+                ],
+            }
         );
     }
 
