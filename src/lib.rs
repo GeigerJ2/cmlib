@@ -2,7 +2,8 @@ use nom::{
     branch::alt,
     bytes::complete::{tag, take_until, take_while, take_while1},
     character::complete::{line_ending, multispace0, space0},
-    combinator::{eof, map, opt, peek},
+    combinator::{eof, fail, map, opt, peek},
+    error::context,
     multi::{many1, many_m_n, many_till},
     sequence::{delimited, preceded, tuple},
     IResult,
@@ -31,6 +32,26 @@ struct AtomicPosition {
 }
 
 type LatticeVector = (String, String, String);
+type Kxyzw = (String, String, String, String);
+
+#[derive(Debug, PartialEq)]
+enum KPoints {
+    Gamma,
+    Automatic {
+        mesh: (String, String, String),
+        offset: (String, String, String),
+    },
+    Kxyzw {
+        // tpiba | crystal | tpiba_b | crystal_b | tpiba_c | crystal_c
+        typ: String,
+
+        // number of kxyzw
+        nks: String,
+
+        // k_x, k_y, k_z and weight
+        lst_xyzw: Vec<Kxyzw>,
+    },
+}
 
 /// Block type for the block container of the input
 #[derive(Debug, PartialEq)]
@@ -55,7 +76,7 @@ enum Block {
     AtomicPositions {
         // `typ` can be one of:
         // alat | bohr | angstrom | crystal | crystal_sg for how position is defined
-        typ: String,
+        typ: Option<String>,
 
         // vec of postions
         lst: Vec<AtomicPosition>,
@@ -68,12 +89,15 @@ enum Block {
     //  v2(1)  	 v2(2)  	 v2(3)
     //  v3(1)  	 v3(2)  	 v3(3)
     CellParameters {
-        // `unit` can be one of { alat | bohr | angstrom }
-        unit: String,
+        // `typ` can be one of { alat | bohr | angstrom }
+        typ: Option<String>,
 
         // vec of lattice constant
         vecs: Vec<LatticeVector>,
     },
+
+    // K_POINTS block
+    KPointsCard(KPoints),
 }
 
 #[derive(Debug, PartialEq)]
@@ -136,8 +160,7 @@ fn double_quoted_string(input: &str) -> IResult<&str, String> {
     )(input)
 }
 
-/// Parse a double-quoted string (e.g. "pseudo/")
-/// While using double quotes is not encouraged.
+/// Parse inner ``curly_braces`` string (e.g. "{alat}")
 fn curly_braces_string(input: &str) -> IResult<&str, String> {
     delimited(
         tag("{"),
@@ -241,7 +264,7 @@ fn parse_position_line(input: &str) -> IResult<&str, AtomicPosition> {
 
 fn parse_atomic_positions(input: &str) -> IResult<&str, Block> {
     let (input, _) = wms(tag("ATOMIC_POSITIONS"))(input)?;
-    let (input, typ) = wms(curly_braces_string)(input)?;
+    let (input, typ) = wms(opt(curly_braces_string))(input)?;
     let (input, lst) = many1(parse_position_line)(input)?;
 
     Ok((input, Block::AtomicPositions { typ, lst }))
@@ -256,7 +279,7 @@ fn parse_vector_line(input: &str) -> IResult<&str, LatticeVector> {
 
 fn parse_cell_parameters(input: &str) -> IResult<&str, Block> {
     let (input, _) = wms(tag("CELL_PARAMETERS"))(input)?;
-    let (input, unit) = wms(curly_braces_string)(input)?;
+    let (input, typ) = wms(opt(curly_braces_string))(input)?;
     let (input, vecs) = many1(parse_vector_line)(input)?;
 
     assert_eq!(
@@ -265,12 +288,57 @@ fn parse_cell_parameters(input: &str) -> IResult<&str, Block> {
         "too many lattice vector for CELL_PARAMETERS, expect 3"
     );
 
-    Ok((input, Block::CellParameters { unit, vecs }))
+    Ok((input, Block::CellParameters { typ, vecs }))
+}
+
+fn parse_kxyzw_line(input: &str) -> IResult<&str, Kxyzw> {
+    let (input, kxyzw) = tuple((
+        ws(bare_ident),
+        ws(bare_ident),
+        ws(bare_ident),
+        ws(bare_ident),
+    ))(input)?;
+    let (input, _) = line_ending(input)?;
+
+    Ok((input, kxyzw))
+}
+
+fn parse_k_points(input: &str) -> IResult<&str, Block> {
+    let (input, _) = wms(tag("K_POINTS"))(input)?;
+    let (input, typ) = wms(opt(curly_braces_string))(input)?;
+
+    // the typ requires to be known before parsing rest. Set to default to "tbipa" accourding to
+    // INPUT_PW.html
+    let typ = typ.unwrap_or(String::from("tpiba"));
+    let (input, kpt) = match typ.as_str() {
+        "gamma" => (input, KPoints::Gamma),
+        "automatic" => {
+            let (input, mesh) = tuple((ws(bare_ident), ws(bare_ident), ws(bare_ident)))(input)?;
+            let (_, offset) = tuple((ws(bare_ident), ws(bare_ident), ws(bare_ident)))(input)?;
+
+            (input, KPoints::Automatic { mesh, offset })
+        }
+        "tpiba" | "crystal" | "tpiba_b" | "crystal_b" | "tpiba_c" | "crystal_c" => {
+            let (input, nks) = wms(bare_ident)(input)?;
+            let (input, lst_xyzw) = many1(parse_kxyzw_line)(input)?;
+
+            (input, KPoints::Kxyzw { typ, nks, lst_xyzw })
+        }
+        _ => return context("unknown typ for K_POINTS card", fail)(input),
+    };
+
+    Ok((input, Block::KPointsCard(kpt)))
 }
 
 fn parse_qe_input(input: &str) -> IResult<&str, QEInput> {
     // Repeatedly parse recognized block until can't
-    let (input, blocks) = many1(wms(alt((parse_namelist,))))(input)?;
+    let (input, blocks) = many1(wms(alt((
+        parse_namelist,
+        parse_atomic_species,
+        parse_atomic_positions,
+        parse_cell_parameters,
+        parse_k_points,
+    ))))(input)?;
 
     Ok((input, QEInput { blocks }))
 }
@@ -310,6 +378,87 @@ mod tests {
 &control
     pseudo_dir  = 'pseudo/'
     calculation = 'scf',
+    prefix = 'Si_exc1',
+    title = ''
+/
+";
+
+        let (_, got) = parse_namelist(input).unwrap();
+        assert_eq!(
+            got,
+            Block::Namelist {
+                name: "control".into(),
+                lst: vec![
+                    ("pseudo_dir".into(), "pseudo/".into()),
+                    ("calculation".into(), "scf".into()),
+                    ("prefix".into(), "Si_exc1".into()),
+                    ("title".into(), "".into())
+                ]
+            }
+        );
+    }
+
+    #[test]
+    fn namelist_many() {
+        let input = r"
+&control
+    pseudo_dir  = 'pseudo/'
+    calculation = 'scf',
+    prefix = 'Si_exc1',
+    title = ''
+/
+ &system
+    ibrav = 0
+    ! ibrav =  -3,
+    celldm(1) = 20.385647759,
+    nat =  1,
+    ntyp = 1,
+    ecutwfc = 30
+ /
+ &electrons
+ /
+";
+
+        let (_, got) = parse_qe_input(input).unwrap();
+        assert_eq!(
+            got,
+            QEInput {
+                blocks: vec![
+                    Block::Namelist {
+                        name: "control".into(),
+                        lst: vec![
+                            ("pseudo_dir".into(), "pseudo/".into()),
+                            ("calculation".into(), "scf".into()),
+                            ("prefix".into(), "Si_exc1".into()),
+                            ("title".into(), "".into())
+                        ]
+                    },
+                    Block::Namelist {
+                        name: "system".into(),
+                        lst: vec![
+                            ("ibrav".into(), "0".into()),
+                            ("celldm(1)".into(), "20.385647759".into()),
+                            ("nat".into(), "1".into()),
+                            ("ntyp".into(), "1".into()),
+                            ("ecutwfc".into(), "30".into())
+                        ]
+                    },
+                    Block::Namelist {
+                        name: "electrons".into(),
+                        lst: vec![]
+                    },
+                ]
+            }
+        );
+    }
+
+    #[test]
+    fn namelist_skip_comment() {
+        let input = r"
+&control
+    pseudo_dir  = 'pseudo/'
+    calculation = 'scf',
+    ! any kind of comment
     prefix = 'Si_exc1',
     title = ''
 /
@@ -418,7 +567,7 @@ ATOMIC_POSITIONS {angstrom}
         assert_eq!(
             got,
             Block::AtomicPositions {
-                typ: "angstrom".into(),
+                typ: Some("angstrom".into()),
                 lst: vec![
                     AtomicPosition {
                         label: "H".into(),
@@ -448,7 +597,7 @@ ATOMIC_POSITIONS {angstrom}
         assert_eq!(
             got,
             Block::AtomicPositions {
-                typ: "angstrom".into(),
+                typ: Some("angstrom".into()),
                 lst: vec![
                     AtomicPosition {
                         label: "H".into(),
@@ -482,94 +631,144 @@ CELL_PARAMETERS {alat}
         assert_eq!(
             got,
             Block::CellParameters {
-                unit: "alat".into(),
+                typ: Some("alat".into()),
                 vecs: vec![
                     ("-1.0".into(), "1.0".into(), "1.0".into()),
                     ("1.0".into(), "-1.0".into(), "1.0".into()),
                     ("1.0".into(), "1.0".into(), "-1.0".into()),
                 ]
             }
-        )
+        );
+
+        let input = r"
+CELL_PARAMETERS
+-1.0 1.0 1.0
+ 1.0 -1.0 1.0
+ 1.0 1.0 -1.0
+";
+        let (_, got) = parse_cell_parameters(input).unwrap();
+        assert_eq!(
+            got,
+            Block::CellParameters {
+                typ: None,
+                vecs: vec![
+                    ("-1.0".into(), "1.0".into(), "1.0".into()),
+                    ("1.0".into(), "-1.0".into(), "1.0".into()),
+                    ("1.0".into(), "1.0".into(), "-1.0".into()),
+                ]
+            }
+        );
     }
 
     #[test]
-    fn namelist_many() {
+    fn kpoints_card() {
         let input = r"
-&control
-    pseudo_dir  = 'pseudo/'
-    calculation = 'scf',
-    prefix = 'Si_exc1',
-    title = ''
-/
+K_POINTS {gamma}
+";
+        let (_, got) = parse_k_points(input).unwrap();
+        assert_eq!(got, Block::KPointsCard(KPoints::Gamma));
+
+        let input = r"
+K_POINTS {automatic}
+ 2 2 2 1 1 1
+";
+        let (_, got) = parse_k_points(input).unwrap();
+        assert_eq!(
+            got,
+            Block::KPointsCard(KPoints::Automatic {
+                mesh: ("2".into(), "2".into(), "2".into()),
+                offset: ("1".into(), "1".into(), "1".into())
+            })
+        );
+        let input = r"
+K_POINTS
+2  
+    0 0 0 1
+    0.5 0.5 0.5 1
+";
+        let (_, got) = parse_k_points(input).unwrap();
+        assert_eq!(
+            got,
+            Block::KPointsCard(KPoints::Kxyzw {
+                typ: "tpiba".into(),
+                nks: "2".into(),
+                lst_xyzw: vec![
+                    ("0".into(), "0".into(), "0".into(), "1".into()),
+                    ("0.5".into(), "0.5".into(), "0.5".into(), "1".into()),
+                ],
+            })
+        );
+    }
+
+    #[test]
+    fn qe_input() {
+        let input = r"
+ &control
+    calculation='scf',
+ /
  &system
-    ibrav = 0
-    ! ibrav =  -3,
-    celldm(1) = 20.385647759,
-    nat =  1,
-    ntyp = 1,
-    ecutwfc = 30
+    ibrav = 1,
+    celldm(1) =10.0,
+    nat=2, ntyp=1,
+    ecutwfc = 25.0
  /
  &electrons
  /
+ATOMIC_SPECIES
+ H 1.0008   H.pz-vbc.UPF
+ATOMIC_POSITIONS {angstrom}
+ H  0.00 0.00 -0.35
+ H  0.00 0.00  0.35
+K_POINTS {automatic}
+ 2 2 2 1 1 1
 ";
-
         let (_, got) = parse_qe_input(input).unwrap();
-        assert_eq!(
-            got,
-            QEInput {
-                blocks: vec![
-                    Block::Namelist {
-                        name: "control".into(),
-                        lst: vec![
-                            ("pseudo_dir".into(), "pseudo/".into()),
-                            ("calculation".into(), "scf".into()),
-                            ("prefix".into(), "Si_exc1".into()),
-                            ("title".into(), "".into())
-                        ]
-                    },
-                    Block::Namelist {
-                        name: "system".into(),
-                        lst: vec![
-                            ("ibrav".into(), "0".into()),
-                            ("celldm(1)".into(), "20.385647759".into()),
-                            ("nat".into(), "1".into()),
-                            ("ntyp".into(), "1".into()),
-                            ("ecutwfc".into(), "30".into())
-                        ]
-                    },
-                    Block::Namelist {
-                        name: "electrons".into(),
-                        lst: vec![]
-                    },
-                ]
-            }
-        );
-    }
-
-    #[test]
-    fn namelist_skip_comment() {
-        let input = r"
-&control
-    pseudo_dir  = 'pseudo/'
-    calculation = 'scf',
-    ! any kind of comment
-    prefix = 'Si_exc1',
-    title = ''
-/
-";
-
-        let (_, got) = parse_namelist(input).unwrap();
-        assert_eq!(
-            got,
-            Block::Namelist {
-                name: "control".into(),
-                lst: vec![
-                    ("pseudo_dir".into(), "pseudo/".into()),
-                    ("calculation".into(), "scf".into()),
-                    ("prefix".into(), "Si_exc1".into()),
-                    ("title".into(), "".into())
-                ]
-            }
-        );
+        let expect = QEInput {
+            blocks: vec![
+                Block::Namelist {
+                    name: "control".into(),
+                    lst: vec![("calculation".into(), "scf".into())],
+                },
+                Block::Namelist {
+                    name: "system".into(),
+                    lst: vec![
+                        ("ibrav".into(), "1".into()),
+                        ("celldm(1)".into(), "10.0".into()),
+                        ("nat".into(), "2".into()),
+                        ("ntyp".into(), "1".into()),
+                        ("ecutwfc".into(), "25.0".into()),
+                    ],
+                },
+                Block::Namelist {
+                    name: "electrons".into(),
+                    lst: vec![],
+                },
+                Block::AtomicSpecies(vec![AtomicSpecie {
+                    label: "H".into(),
+                    mass: "1.0008".into(),
+                    pseudo: "H.pz-vbc.UPF".into(),
+                }]),
+                Block::AtomicPositions {
+                    typ: Some("angstrom".into()),
+                    lst: vec![
+                        AtomicPosition {
+                            label: "H".into(),
+                            position: vec!["0.00".into(), "0.00".into(), "-0.35".into()],
+                            if_pos: None,
+                        },
+                        AtomicPosition {
+                            label: "H".into(),
+                            position: vec!["0.00".into(), "0.00".into(), "0.35".into()],
+                            if_pos: None,
+                        },
+                    ],
+                },
+                Block::KPointsCard(KPoints::Automatic {
+                    mesh: ("2".into(), "2".into(), "2".into()),
+                    offset: ("1".into(), "1".into(), "1".into()),
+                }),
+            ],
+        };
+        assert_eq!(got, expect);
     }
 }
