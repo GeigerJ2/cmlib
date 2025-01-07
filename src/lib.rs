@@ -3,7 +3,7 @@ use nom::{
     bytes::complete::{tag, take_until, take_while, take_while1},
     character::complete::{line_ending, multispace0, space0},
     combinator::{eof, map, opt, peek},
-    multi::{many1, many_till},
+    multi::{many1, many_m_n, many_till},
     sequence::{delimited, preceded, tuple},
     IResult,
 };
@@ -30,6 +30,8 @@ struct AtomicPosition {
     if_pos: Option<(String, String, String)>,
 }
 
+type LatticeVector = (String, String, String);
+
 /// Block type for the block container of the input
 #[derive(Debug, PartialEq)]
 enum Block {
@@ -39,12 +41,13 @@ enum Block {
         lst: Vec<KeyValPair>,
     },
 
-    // ATOMIC_SPECIES block has format:
+    // ATOMIC_SPECIES block has syntax:
     // X Mass_X PseudoPot_X
     // for every element of the structure
     AtomicSpecies(Vec<AtomicSpecie>),
 
     // ATOMIC_POSITIONS bolck has format:
+    //
     // ATOMIC_POSITIONS { alat | bohr | angstrom | crystal | crystal_sg }
     // X(1)  	 x(1)  	 y(1)  	 z(1)  	{ 	 if_pos(1)(1)  	 if_pos(2)(1)  	 if_pos(3)(1)  	}
     // X(2)  	 x(2)  	 y(2)  	 z(2)  	{ 	 if_pos(1)(2)  	 if_pos(2)(2)  	 if_pos(3)(2)  	}
@@ -56,6 +59,20 @@ enum Block {
 
         // vec of postions
         lst: Vec<AtomicPosition>,
+    },
+
+    // CELL_PARAMETERS block has syntax:
+    //
+    // CELL_PARAMETERS { alat | bohr | angstrom }
+    //  v1(1)  	 v1(2)  	 v1(3)
+    //  v2(1)  	 v2(2)  	 v2(3)
+    //  v3(1)  	 v3(2)  	 v3(3)
+    CellParameters {
+        // `unit` can be one of { alat | bohr | angstrom }
+        unit: String,
+
+        // vec of lattice constant
+        vecs: Vec<LatticeVector>,
     },
 }
 
@@ -83,7 +100,6 @@ where
 // Parse a bare (unquoted) identifier or keyword (e.g. calculation, prefix)
 // `alphanumeric`, `_`, `(`, `)`, `.`, `-`, `/` in the parsed string.
 fn bare_ident(input: &str) -> IResult<&str, String> {
-    dbg!(input);
     map(
         take_while1(|c: char| {
             c.is_alphanumeric()
@@ -229,6 +245,27 @@ fn parse_atomic_positions(input: &str) -> IResult<&str, Block> {
     let (input, lst) = many1(parse_position_line)(input)?;
 
     Ok((input, Block::AtomicPositions { typ, lst }))
+}
+
+fn parse_vector_line(input: &str) -> IResult<&str, LatticeVector> {
+    let (input, vv) = tuple((ws(bare_ident), ws(bare_ident), ws(bare_ident)))(input)?;
+    let (input, _) = line_ending(input)?;
+
+    Ok((input, vv))
+}
+
+fn parse_cell_parameters(input: &str) -> IResult<&str, Block> {
+    let (input, _) = wms(tag("CELL_PARAMETERS"))(input)?;
+    let (input, unit) = wms(curly_braces_string)(input)?;
+    let (input, vecs) = many1(parse_vector_line)(input)?;
+
+    assert_eq!(
+        vecs.len(),
+        3,
+        "too many lattice vector for CELL_PARAMETERS, expect 3"
+    );
+
+    Ok((input, Block::CellParameters { unit, vecs }))
 }
 
 fn parse_qe_input(input: &str) -> IResult<&str, QEInput> {
@@ -431,6 +468,28 @@ ATOMIC_POSITIONS {angstrom}
                 ],
             }
         );
+    }
+
+    #[test]
+    fn cell_parameters() {
+        let input = r"
+CELL_PARAMETERS {alat}
+-1.0 1.0 1.0
+ 1.0 -1.0 1.0
+ 1.0 1.0 -1.0
+";
+        let (_, got) = parse_cell_parameters(input).unwrap();
+        assert_eq!(
+            got,
+            Block::CellParameters {
+                unit: "alat".into(),
+                vecs: vec![
+                    ("-1.0".into(), "1.0".into(), "1.0".into()),
+                    ("1.0".into(), "-1.0".into(), "1.0".into()),
+                    ("1.0".into(), "1.0".into(), "-1.0".into()),
+                ]
+            }
+        )
     }
 
     #[test]
