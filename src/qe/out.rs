@@ -7,7 +7,7 @@ use nom::{
     combinator::{cut, map, opt},
     error::{context, ContextError, ParseError, VerboseError},
     multi::{many0, many_till},
-    sequence::{delimited, preceded, terminated, tuple},
+    sequence::{delimited, preceded, separated_pair, terminated, tuple},
     AsChar, IResult, Parser,
 };
 
@@ -36,9 +36,9 @@ enum Block {
 
 /// wms remove white space before and after the inner parser
 /// It mostly used for line parser
-fn wms<'a, F, O>(inner: F) -> impl FnMut(&'a str) -> IResult<&'a str, O>
+fn wms<'a, F, O>(inner: F) -> impl FnMut(&'a str) -> IResult<&'a str, O, VerboseError<&str>>
 where
-    F: FnMut(&'a str) -> IResult<&'a str, O>,
+    F: FnMut(&'a str) -> IResult<&'a str, O, VerboseError<&str>>,
 {
     delimited(multispace0, inner, multispace0)
 }
@@ -87,8 +87,14 @@ fn parse_key_value<'a>(
     delimiter: &'a str,
 ) -> impl Fn(&'a str) -> IResult<&'a str, (String, String, Option<String>), VerboseError<&str>> {
     move |input: &'a str| {
-        let (input, key) = context("parse aa", terminated(take_until(delimiter), tag(delimiter)))(input)?;
-        let (input, value) = context("number", ws(bare_number))(input)?;
+        let (input, (key, value)) = context(
+            "parse key-value pair",
+            separated_pair(
+                take_until(delimiter),  // Parse the key (everything before the delimiter)
+                tag(delimiter),         // The delimiter
+                ws(bare_number),        // Parse the value (number) after the delimiter
+            ),
+        )(input)?;
 
         // Optionally parse a unit to the end of the line.
         let (input, unit_opt) = opt(preceded(space0, not_line_ending))(input)?;
@@ -98,7 +104,7 @@ fn parse_key_value<'a>(
     }
 }
 
-fn take_until_and_consume<'a>(
+fn take_until_consume<'a>(
     term: &'a str,
 ) -> impl Fn(&'a str) -> IResult<&'a str, (&'a str, &'a str), VerboseError<&str>> {
     move |input: &'a str| {
@@ -129,9 +135,12 @@ fn parse_tot_energy(input: &str) -> IResult<&str, TotalEnergies, VerboseError<&s
 }
 
 fn parse_energy_components(input: &str) -> IResult<&str, Vec<(String, f64)>, VerboseError<&str>> {
-    let (input, _) = take_until_and_consume("E is the sum of the following terms:")(input)?;
-    let (input, (contribs, _)) =
-        many_till(terminated(parse_key_value(" = "), newline), tag("\n\n"))(input)?;
+    let (input, _) = take_until_consume("E is the sum of the following terms:")(input)?;
+    let (_, block) = take_until("\n\n")(input)?;
+    let (input, contribs) = context(
+        "do many",
+        many0(terminated(parse_key_value(" = "), opt(newline))),
+    )(block)?;
 
     // discard the unit
     // TODO: convert to eV
@@ -156,8 +165,6 @@ fn parse_final_mag(input: &str) -> IResult<&str, (String, String), VerboseError<
 
 #[cfg(test)]
 mod tests {
-    use nom::Finish;
-
     use super::*;
 
     #[test]
@@ -179,8 +186,8 @@ mod tests {
         let (_, got) = parse_tot_energy(input).unwrap();
         dbg!(got);
 
-        let e = context("energy component", parse_energy_components)(input).finish().err().unwrap();
-        dbg!(e);
+        let got = parse_energy_components(input).unwrap();
+        dbg!(got);
     }
 
     // #[test]
