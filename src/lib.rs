@@ -1,3 +1,4 @@
+pub mod shared;
 pub mod qe;
 pub mod vasp;
 

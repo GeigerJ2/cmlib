@@ -1,7 +1,8 @@
+use crate::shared::{bare_ident, wms, ws};
 use nom::{
     branch::alt,
-    bytes::complete::{tag, take_till1, take_until, take_while, take_while1},
-    character::complete::{line_ending, multispace0, space0},
+    bytes::complete::{tag, take_till1, take_until, take_while},
+    character::complete::{line_ending, multispace0},
     combinator::{fail, map, opt},
     error::context,
     multi::{many1, many_till},
@@ -103,44 +104,6 @@ enum Block {
 #[derive(Debug, PartialEq)]
 pub struct QEInput {
     blocks: Vec<Block>,
-}
-
-/// wms remove white space before and after the inner parser
-/// It mostly used for line parser
-fn wms<'a, F, O>(inner: F) -> impl FnMut(&'a str) -> IResult<&'a str, O>
-where
-    F: FnMut(&'a str) -> IResult<&'a str, O>,
-{
-    delimited(multispace0, inner, multispace0)
-}
-
-/// ws remove white space (different from `wms` will not remove line break) before and after the inner parser
-/// It mostly used for identifier parser
-fn ws<'a, F, O>(inner: F) -> impl FnMut(&'a str) -> IResult<&'a str, O>
-where
-    F: FnMut(&'a str) -> IResult<&'a str, O>,
-{
-    delimited(space0, inner, space0)
-}
-
-// Parse a bare (unquoted) identifier or keyword (e.g. calculation, prefix)
-// `alphanumeric`, `_`, `(`, `)`, `.`, `-`, `/` in the parsed string.
-fn bare_ident(input: &str) -> IResult<&str, String> {
-    map(
-        take_while1(|c: char| {
-            c.is_alphanumeric()
-                || c == '_'
-                || c == '('
-                || c == ')'
-                || c == '.'
-                || c == '-'
-                || c == '/'
-                || c == '+'
-                || c == '*'
-                || c == '^'
-        }),
-        |s: &str| s.to_string(),
-    )(input)
 }
 
 // Parse a single-quoted string (e.g. 'pseudo/')

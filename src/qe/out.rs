@@ -1,12 +1,12 @@
 use nom::{
-    bytes::complete::{escaped, tag, take_until, take_until1, take_while1},
+    bytes::complete::{tag, take_until, take_while1},
     character::{
-        complete::{char, newline, not_line_ending, space0},
+        complete::{newline, not_line_ending, space0},
         streaming::multispace0,
     },
-    combinator::{cut, map, opt},
-    error::{context, ContextError, ParseError, VerboseError},
-    multi::{many0, many_till},
+    combinator::{map, opt},
+    error::{context, VerboseError},
+    multi::many0,
     sequence::{delimited, preceded, separated_pair, terminated, tuple},
     AsChar, IResult, Parser,
 };
@@ -85,7 +85,7 @@ fn bare_number(input: &str) -> IResult<&str, String, VerboseError<&str>> {
 
 fn parse_key_value<'a>(
     delimiter: &'a str,
-) -> impl Fn(&'a str) -> IResult<&'a str, (String, String, Option<String>), VerboseError<&str>> {
+) -> impl Fn(&'a str) -> IResult<&'a str, (String, String, Option<String>), VerboseError<&'a str>> {
     move |input: &'a str| {
         let (input, (key, value)) = context(
             "parse key-value pair",
@@ -106,7 +106,7 @@ fn parse_key_value<'a>(
 
 fn take_until_consume<'a>(
     term: &'a str,
-) -> impl Fn(&'a str) -> IResult<&'a str, (&'a str, &'a str), VerboseError<&str>> {
+) -> impl Fn(&'a str) -> IResult<&'a str, (&'a str, &'a str), VerboseError<&'a str>> {
     move |input: &'a str| {
         let (input, (pre, term)) = tuple((take_until(term), tag(term)))(input)?;
         Ok((input, (pre, term)))
