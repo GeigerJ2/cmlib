@@ -1,3 +1,5 @@
+#![allow(dead_code, unused_imports)]
+
 use nom::{
     bytes::complete::{tag, take_until, take_while1},
     character::{

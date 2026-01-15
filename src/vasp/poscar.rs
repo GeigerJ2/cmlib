@@ -65,10 +65,9 @@ pub struct Poscar {
 
 /// Parse comment line (line 1): arbitrary text until newline
 fn parse_comment_line(input: &str) -> IResult<&str, String> {
-    map(
-        preceded(multispace0, not_line_ending),
-        |s: &str| s.to_string(),
-    )(input)
+    map(preceded(multispace0, not_line_ending), |s: &str| {
+        s.to_string()
+    })(input)
 }
 
 /// Parse scaling factor (line 2): single float
@@ -119,13 +118,9 @@ fn parse_selective_dynamics_line(input: &str) -> IResult<&str, bool> {
 fn parse_coordinate_type(input: &str) -> IResult<&str, CoordinateType> {
     let (input, _) = multispace0(input)?;
     alt((
-        map(
-            alt((
-                tag_no_case("Direct"),
-                tag_no_case("D"),
-            )),
-            |_| CoordinateType::Direct,
-        ),
+        map(alt((tag_no_case("Direct"), tag_no_case("D"))), |_| {
+            CoordinateType::Direct
+        }),
         map(
             alt((
                 tag_no_case("Cartesian"),
@@ -140,12 +135,7 @@ fn parse_coordinate_type(input: &str) -> IResult<&str, CoordinateType> {
 
 /// Parse selective dynamics flags: T/F T/F T/F
 fn parse_selective_flags(input: &str) -> IResult<&str, SelectiveFlags> {
-    let parse_bool = || {
-        alt((
-            map(tag("T"), |_| true),
-            map(tag("F"), |_| false),
-        ))
-    };
+    let parse_bool = || alt((map(tag("T"), |_| true), map(tag("F"), |_| false)));
     tuple((ws(parse_bool()), ws(parse_bool()), ws(parse_bool())))(input)
 }
 
@@ -317,7 +307,10 @@ mod tests {
     fn test_lattice_vector() {
         let input = "5.43 0.0 0.0";
         let (_, vec) = parse_lattice_vector(input).unwrap();
-        assert_eq!(vec, ("5.43".to_string(), "0.0".to_string(), "0.0".to_string()));
+        assert_eq!(
+            vec,
+            ("5.43".to_string(), "0.0".to_string(), "0.0".to_string())
+        );
     }
 
     #[test]
@@ -325,7 +318,10 @@ mod tests {
         let input = "5.43 0.0 0.0\n0.0 5.43 0.0\n0.0 0.0 5.43";
         let (_, vecs) = parse_lattice_vectors(input).unwrap();
         assert_eq!(vecs.len(), 3);
-        assert_eq!(vecs[0], ("5.43".to_string(), "0.0".to_string(), "0.0".to_string()));
+        assert_eq!(
+            vecs[0],
+            ("5.43".to_string(), "0.0".to_string(), "0.0".to_string())
+        );
     }
 
     #[test]
@@ -412,7 +408,10 @@ mod tests {
     fn test_position_line_basic() {
         let input = "0.0 0.0 0.0";
         let (_, pos) = parse_position_line(false)(input).unwrap();
-        assert_eq!(pos.position, ("0.0".to_string(), "0.0".to_string(), "0.0".to_string()));
+        assert_eq!(
+            pos.position,
+            ("0.0".to_string(), "0.0".to_string(), "0.0".to_string())
+        );
         assert_eq!(pos.selective, None);
     }
 
@@ -420,7 +419,10 @@ mod tests {
     fn test_position_line_with_selective() {
         let input = "0.0 0.0 0.0 T T F";
         let (_, pos) = parse_position_line(true)(input).unwrap();
-        assert_eq!(pos.position, ("0.0".to_string(), "0.0".to_string(), "0.0".to_string()));
+        assert_eq!(
+            pos.position,
+            ("0.0".to_string(), "0.0".to_string(), "0.0".to_string())
+        );
         assert_eq!(pos.selective, Some((true, true, false)));
     }
 
@@ -428,14 +430,24 @@ mod tests {
     fn test_negative_coordinates() {
         let input = "-0.5 -0.25 0.75";
         let (_, pos) = parse_position_line(false)(input).unwrap();
-        assert_eq!(pos.position, ("-0.5".to_string(), "-0.25".to_string(), "0.75".to_string()));
+        assert_eq!(
+            pos.position,
+            ("-0.5".to_string(), "-0.25".to_string(), "0.75".to_string())
+        );
     }
 
     #[test]
     fn test_scientific_notation() {
         let input = "1.0e-5 2.5E+3 -1.2e-10";
         let (_, pos) = parse_position_line(false)(input).unwrap();
-        assert_eq!(pos.position, ("1.0e-5".to_string(), "2.5E+3".to_string(), "-1.2e-10".to_string()));
+        assert_eq!(
+            pos.position,
+            (
+                "1.0e-5".to_string(),
+                "2.5E+3".to_string(),
+                "-1.2e-10".to_string()
+            )
+        );
     }
 
     #[test]
@@ -460,8 +472,14 @@ Direct
         assert!(!poscar.selective_dynamics);
         assert_eq!(poscar.coordinate_type, CoordinateType::Direct);
         assert_eq!(poscar.positions.len(), 2);
-        assert_eq!(poscar.positions[0].position, ("0.0".to_string(), "0.0".to_string(), "0.0".to_string()));
-        assert_eq!(poscar.positions[1].position, ("0.25".to_string(), "0.25".to_string(), "0.25".to_string()));
+        assert_eq!(
+            poscar.positions[0].position,
+            ("0.0".to_string(), "0.0".to_string(), "0.0".to_string())
+        );
+        assert_eq!(
+            poscar.positions[1].position,
+            ("0.25".to_string(), "0.25".to_string(), "0.25".to_string())
+        );
     }
 
     #[test]
